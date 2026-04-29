@@ -17,8 +17,24 @@ from .config import (
 
 _last_call_time: float = 0.0
 _quota_exhausted: bool = False
+_call_count: int = 0
+_call_cap: Optional[int] = None
 
 _session = requests.Session()
+
+
+def set_call_cap(n: Optional[int]) -> None:
+    global _call_cap, _call_count
+    _call_cap = n
+    _call_count = 0
+
+
+def get_call_count() -> int:
+    return _call_count
+
+
+def get_call_cap() -> Optional[int]:
+    return _call_cap
 
 _BAD_CODES_FILE = PROJECT_ROOT / "data" / "known_bad_db_codes.json"
 
@@ -62,6 +78,10 @@ class QuotaExhaustedError(RuntimeError):
     pass
 
 
+class CallCapReachedError(RuntimeError):
+    pass
+
+
 _NO_CACHE_HEADERS = {
     "Cache-Control": "no-cache, no-store, must-revalidate",
     "Pragma": "no-cache",
@@ -70,6 +90,16 @@ _NO_CACHE_HEADERS = {
 
 PAGE_START_PARAM = "startIndex"
 PAGE_START_BASE = 0
+
+DB_CODE_ALIASES = {
+    "EU": "EUIPO",
+    "US": "USPTO",
+}
+
+
+def _translate_aliases(databases: str) -> str:
+    parts = [p.strip() for p in databases.split(",") if p.strip()]
+    return ",".join(DB_CODE_ALIASES.get(p, p) for p in parts)
 
 
 @dataclass
@@ -102,13 +132,21 @@ def search(
     http_timeout: Optional[float] = None,
     gas: int = 1,
 ) -> Result:
+    global _call_count, _quota_exhausted
     if _quota_exhausted:
         raise QuotaExhaustedError(
             "Markify quota exhausted. Wait for reset or use a fresh API key."
         )
+    if _call_cap is not None and _call_count >= _call_cap:
+        raise CallCapReachedError(
+            f"Reached --max-calls cap ({_call_cap}). Resume tomorrow."
+        )
 
     timeout = http_timeout if http_timeout is not None else HTTP_TIMEOUT
     _wait_for_rate_limit()
+    _call_count += 1
+
+    databases = _translate_aliases(databases)
 
     params = {
         "api_key": MARKIFY_API_KEY,
@@ -148,7 +186,6 @@ def search(
     if response.status_code != 200:
         err_kind = classify_error(response.text)
         if err_kind == "quota_exceeded":
-            global _quota_exhausted
             _quota_exhausted = True
         elif err_kind == "bad_db_code" and "," not in databases:
             db_key = databases.strip()

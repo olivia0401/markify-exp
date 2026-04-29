@@ -21,7 +21,9 @@ def main():
 
     raw = pd.read_csv(IN_CSV, encoding="latin-1")
     all_names = sorted(raw["input_name"].unique())
-    scored = raw[raw["call_status"].isin(["ok", "ok_truncated"])].dropna(subset=["score"])
+    scored = raw[raw["call_status"].isin(["ok", "ok_truncated"])].copy()
+    scored["score"] = pd.to_numeric(scored["score"], errors="coerce")
+    scored = scored.dropna(subset=["score"])
 
     print(f"Loaded {len(raw)} rows, {len(all_names)} names")
     print(f"  scored rows: {len(scored)}")
@@ -29,53 +31,33 @@ def main():
 
     summary = (
         scored.groupby("input_name")["score"]
-        .agg(
-            n_results="count",
-            max_score="max",
-            p95_score=lambda s: s.quantile(0.95),
-            mean_score="mean",
-            median_score="median",
-        )
+        .agg(max_score="max", n_results="count")
         .round(4)
+        .reset_index()
     )
-    for n in set(all_names) - set(summary.index):
-        summary.loc[n] = [0, 0, 0, 0, 0]
-
-    def band(m):
-        if m == 0:
-            return "1_zero_match"
-        if m < 0.5:
-            return "2_very_far"
-        if m < 0.7:
-            return "3_medium"
-        if m < 0.9:
-            return "4_close"
-        return "5_very_close"
-
-    summary["risk_band"] = summary["max_score"].apply(band)
-    summary = summary.sort_values("max_score", ascending=False)
-    summary.to_csv(OUTPUTS_DIR / "exp1_per_name_summary.csv")
-    print(f"-> exp1_per_name_summary.csv ({len(summary)} names)")
-
-    bands = (
-        summary.groupby("risk_band")
-        .size()
-        .reset_index(name="n_names")
-        .sort_values("risk_band")
-    )
-    bands["pct"] = (bands["n_names"] / len(summary) * 100).round(1)
-    bands.to_csv(OUTPUTS_DIR / "exp1_risk_bands.csv", index=False)
-    print("-> exp1_risk_bands.csv")
+    zero_names = sorted(set(all_names) - set(summary["input_name"]))
+    if zero_names:
+        zero_df = pd.DataFrame(
+            {"input_name": zero_names, "max_score": 0.0, "n_results": 0}
+        )
+        summary = pd.concat([summary, zero_df], ignore_index=True)
+    summary = summary.sort_values("max_score", ascending=False).reset_index(drop=True)
+    summary.insert(0, "rank", range(1, len(summary) + 1))
+    summary.to_csv(OUTPUTS_DIR / "exp1_per_name_summary.csv", index=False)
+    print(f"-> exp1_per_name_summary.csv ({len(summary)} names, ranked 1-{len(summary)})")
 
     all_scores = scored["score"].values
+    n_with_matches = scored["input_name"].nunique()
+    n_zero_match = len(all_names) - n_with_matches
     fig, ax = plt.subplots(figsize=(11, 5))
     ax.hist(all_scores, bins=40, edgecolor="black", alpha=0.75)
     ax.set_xlim(0, 1)
     ax.set_xlabel("Distance Score")
     ax.set_ylabel("Number of trademark matches")
     ax.set_title(
-        f"Distribution of all {len(all_scores)} match scores across "
-        f"{scored['input_name'].nunique()} names"
+        f"Distribution of {len(all_scores)} match scores from "
+        f"{len(all_names)} candidate names "
+        f"({n_zero_match} had no matches, not shown)"
     )
     label_lines = []
     for t in (0.7, 0.8, 0.9):
@@ -113,9 +95,8 @@ def main():
     n_zero = (max_scores == 0).sum()
     n_high = (max_scores >= 0.9).sum()
     ax.set_title(
-        f"Per-name max_score distribution: "
-        f"{n_zero}/{len(max_scores)} names = 0, "
-        f"{n_high}/{len(max_scores)} names >= 0.9"
+        f"Highest similarity per candidate ({len(max_scores)} candidates total): "
+        f"{n_zero} have max=0, {n_high} have max>=0.9"
     )
     for t in (0.7, 0.8, 0.9):
         ax.axvline(t, color="crimson", linestyle="--", linewidth=1, alpha=0.7)
@@ -138,16 +119,11 @@ def main():
         ax.hist(scores, bins=args.bins, edgecolor="black", alpha=0.75)
         ax.set_xlim(0, 1)
         ax.set_xlabel("Distance Score")
-        ax.set_title(f"{name} - {len(scores)} results, max={scores.max():.3f}")
+        ax.set_title(f"{name} - {len(scores)} matches, max={scores.max():.3f}")
         fig.tight_layout()
         fig.savefig(out_dir / f"{name}.png", dpi=120)
         plt.close(fig)
-    print(f"-> exp1_sample_hists/ ({len(sample)} histograms)\n")
-
-    print(bands.to_string(index=False))
-    print("\nGray zone names:")
-    gray = summary[(summary["max_score"] >= 0.5) & (summary["max_score"] < 0.9)]
-    print(gray.to_string())
+    print(f"-> exp1_sample_hists/ ({len(sample)} histograms)")
 
 
 if __name__ == "__main__":
