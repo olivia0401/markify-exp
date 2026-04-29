@@ -1,0 +1,16 @@
+# virtual environment
+.venv/
+
+# Environment variables (may contain secrets, don't commit)
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Outputs
+outputs/
+
+# IDE / System
+.vscode/
+.DS_Store
