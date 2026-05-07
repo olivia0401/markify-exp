@@ -49,6 +49,14 @@ def main():
     else:
         df = df_full.copy()
 
+    # Bug fix: split rows previously stored total_elapsed = sum of sub-calls only,
+    # omitting the failed first call (often an 18s timeout). original_elapsed
+    # preserves it, so reconstruct true API time per scenario here.
+    split_mask = df["was_split"].astype(bool)
+    df.loc[split_mask, "total_elapsed"] = (
+        df.loc[split_mask, "original_elapsed"] + df.loc[split_mask, "total_elapsed"]
+    )
+
     valid = df[df["attempt_status"].isin(VALID_STATUSES)].copy()
     n_valid = len(valid)
     print(f"Valid for timing: {n_valid} / {len(df)}\n")
@@ -150,23 +158,26 @@ def main():
     if sigma < 0.2 and mean_pess > 1.0:
         print(f"WARNING: sigma = {sigma:.3f}s suspiciously small (mean = {mean_pess:.2f}s)")
 
-    n_not_split = (~valid["was_split"]).sum() if n_valid else 0
+    # Each scenario = 1 first call (always) + n_sub_calls (only if split).
+    # Previously this missed the failed first call on split rows.
     total_sub_calls = (
         valid.loc[valid["was_split"], "n_sub_calls"].sum() if n_valid else 0
     )
-    avg_calls = (n_not_split + total_sub_calls) / max(n_valid, 1)
+    avg_calls = (n_valid + total_sub_calls) / max(n_valid, 1)
 
     rows = []
     for n in [500, 1000, 5000, 10000, 20000]:
-        per_scenario = max(mean_pess, avg_calls * RATE_LIMIT_SECONDS)
         api_calls_needed = n * avg_calls
+        pure_api_hr = n * mean_pess / 3600
+        wall_time_hr = n * (mean_pess + (avg_calls - 1) * RATE_LIMIT_SECONDS) / 3600
         rows.append(
             {
                 "n_names": n,
                 "api_calls_needed": int(round(api_calls_needed)),
-                "pure_api_hr": round(n * per_scenario / 3600, 2),
+                "pure_api_hr": round(pure_api_hr, 2),
+                "wall_time_hr": round(wall_time_hr, 2),
                 "quota_periods_needed": round(api_calls_needed / QUOTA_PER_PERIOD, 1),
-                "ci95_half_sec": round(1.96 * sigma * np.sqrt(n), 1),
+                "ci95_total_batch_sec": round(1.96 * sigma * np.sqrt(n), 1),
             }
         )
     extrap_df = pd.DataFrame(rows)

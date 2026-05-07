@@ -3,45 +3,30 @@ import time
 
 import pandas as pd
 
-from src.config import INPUT_XLSX, OUTPUTS_DIR
+from src.config import (
+    HTTP_TIMEOUT,
+    INPUT_XLSX,
+    KNOWN_BAD_CODES_FILE,
+    MARKIFY_API_KEY,
+    OUTPUTS_DIR,
+    RATE_LIMIT_SECONDS,
+)
 from src.markify_client import (
     CallCapReachedError,
+    MarkifyClient,
     QuotaExhaustedError,
-    get_call_count,
-    search_all,
-    set_call_cap,
 )
+from src.utils import normalize_value, parse_databases, safe_to_csv
 
 OUT_CSV = OUTPUTS_DIR / "exp1_results.csv"
 MAX_PAGES_PER_DB = 100
 DONE_STATUSES = {"ok", "ok_empty"}
 
 
-def safe_to_csv(df, path, *, mode: str, header: bool, max_retries: int = 6):
-    delay = 0.5
-    for attempt in range(max_retries):
-        try:
-            df.to_csv(path, mode=mode, header=header, index=False)
-            return
-        except PermissionError:
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(delay)
-            delay *= 2
-
-
-def normalize_value(v) -> str:
-    if isinstance(v, (int, float)):
-        return str(int(v))
-    return str(v).strip()
-
-
-def parse_databases(s: str) -> list[str]:
-    return [d.strip() for d in s.split(",") if d.strip()]
-
-
-def call_one_db(name: str, classes: str, db: str) -> tuple[list[dict], dict]:
-    r = search_all(
+def call_one_db(
+    client: MarkifyClient, name: str, classes: str, db: str
+) -> tuple[list[dict], dict]:
+    r = client.search_all(
         mark=name,
         classes=classes,
         databases=db,
@@ -130,7 +115,13 @@ def main():
     ap.add_argument("--max-names", type=int, default=None)
     args = ap.parse_args()
 
-    set_call_cap(args.max_calls)
+    client = MarkifyClient(
+        api_key=MARKIFY_API_KEY,
+        rate_limit_seconds=RATE_LIMIT_SECONDS,
+        http_timeout=HTTP_TIMEOUT,
+        call_cap=args.max_calls,
+        bad_codes_file=KNOWN_BAD_CODES_FILE,
+    )
 
     df = pd.read_excel(INPUT_XLSX, sheet_name="Distance_Score_Tests")
     print(f"Loaded {len(df)} names. Cap: {args.max_calls} calls.")
@@ -170,10 +161,10 @@ def main():
 
     for i, (name, classes, db) in enumerate(todo, 1):
         try:
-            sub_rows, summary = call_one_db(name, classes, db)
+            sub_rows, summary = call_one_db(client, name, classes, db)
         except (QuotaExhaustedError, CallCapReachedError) as e:
             print(f"\nStopped at {i}/{len(todo)}: {e}")
-            print(f"Calls used: {get_call_count()}. Resume tomorrow with same command.")
+            print(f"Calls used: {client.call_count}. Resume tomorrow with same command.")
             return
 
         safe_to_csv(pd.DataFrame(sub_rows), OUT_CSV, mode="a", header=write_header)
@@ -183,11 +174,11 @@ def main():
             f"[{i}/{len(todo)}] {name} x {db}: "
             f"{summary['n_results']} results, {summary['pages']} pages, "
             f"{summary['elapsed']:.1f}s "
-            f"[calls: {get_call_count()}/{args.max_calls}]"
+            f"[calls: {client.call_count}/{args.max_calls}]"
         )
 
     total = time.monotonic() - start
-    print(f"\nDone in {total/60:.1f} min. Calls used: {get_call_count()}.")
+    print(f"\nDone in {total/60:.1f} min. Calls used: {client.call_count}.")
 
 
 if __name__ == "__main__":

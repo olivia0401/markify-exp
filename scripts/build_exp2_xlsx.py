@@ -33,8 +33,9 @@ EXTRAP_COLS = {
     "n_names": "Number of Names",
     "api_calls_needed": "Estimated API Calls",
     "pure_api_hr": "Pure API Time (hours)",
+    "wall_time_hr": "Wall-Clock Time incl. 2s pacing (hours)",
     "quota_periods_needed": "Quota Periods Needed (x 2,000)",
-    "ci95_half_sec": "CI95 Half-Width (seconds)",
+    "ci95_total_batch_sec": "Total Batch Time CI95 +/- (s)",
 }
 
 OLS_COLS = {
@@ -85,8 +86,18 @@ def add_sized_image(ws, path, anchor_row, width=720, height=340):
     return anchor_row + (height // 20) + 2
 
 
-def compute_metadata():
+def load_results_corrected():
     df = pd.read_csv(RESULTS_CSV)
+    if "was_split" in df.columns:
+        split_mask = df["was_split"].astype(bool)
+        df.loc[split_mask, "total_elapsed"] = (
+            df.loc[split_mask, "original_elapsed"] + df.loc[split_mask, "total_elapsed"]
+        )
+    return df
+
+
+def compute_metadata():
+    df = load_results_corrected()
     n = len(df)
     valid_mask = df["attempt_status"].isin(["ok", "split_ok", "split_partial"])
     valid_df = df[valid_mask]
@@ -238,13 +249,17 @@ def write_extrapolation(wb):
         ("EXTRAPOLATION - projected runtime for batch jobs", "title"),
         ("", None),
         ("HOW TO READ", "bold"),
-        ("  Estimated API Calls = N x avg calls per name (including split sub-calls).", None),
-        ("  Pure API Time = wall-clock if quota were unlimited.", None),
+        ("  Estimated API Calls = N x avg calls/name, including the failed first call when a scenario was split.", None),
+        ("  Pure API Time = N x mean per-scenario API time (server processing only, no client pacing).", None),
+        ("  Wall-Clock Time = Pure API Time + (avg_calls - 1) x 2s sleep between calls (our rate-limit policy).", None),
         ("  Quota Periods Needed = total calls / 2,000 (Markify daily cap).", None),
-        ("  CI95 Half-Width = +/- range from variance subset (1.96 * sigma * sqrt(N)).", None),
+        ("  Total Batch Time CI95 +/- = 95% half-width on the SUM of N per-name times,", None),
+        ("    formula 1.96 * sigma * sqrt(N). sigma is the mean within-scenario std from the variance run", None),
+        ("    (10 scenarios x 30 rounds). Assumes one sigma across all names; real sigma grows with #DBs", None),
+        ("    and name length, so this band is optimistic.", None),
         ("", None),
         ("KEY FINDING", "bold"),
-        ("  Quota dominates: 20k names ~ ~30 days, NOT 24 hours of API time.", None),
+        ("  Quota dominates: 20k names ~ 30+ days, even though pure API time is only ~75-80 hours.", None),
         ("  Higher Markify tier required for production-scale batches.", None),
         ("", None),
     ]
@@ -256,7 +271,7 @@ def write_extrapolation(wb):
         df = df[keep].rename(columns={c: EXTRAP_COLS[c] for c in keep})
         write_table(ws, df, start_row=next_row)
 
-    widths = [22, 25, 22, 32, 26]
+    widths = [22, 25, 22, 36, 32, 30]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
 
@@ -310,7 +325,7 @@ def write_raw_data(wb):
     ]
     next_row = write_lines(ws, intro)
 
-    df = pd.read_csv(RESULTS_CSV)
+    df = load_results_corrected()
     keep = [c for c in SINGLE_LIST_COLS if c in df.columns]
     df = df[keep].rename(columns={c: SINGLE_LIST_COLS[c] for c in keep})
     header_row = next_row

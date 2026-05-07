@@ -15,10 +15,9 @@ HTTP_TIMEOUT = 18
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 INPUT_XLSX = DATA_DIR / "Markify tests.xlsx"
+KNOWN_BAD_CODES_FILE = DATA_DIR / "known_bad_db_codes.json"
 
 OUTPUTS_DIR.mkdir(exist_ok=True)
-
-if not MARKIFY_API_KEY:
-    raise RuntimeError(
-        "MARKIFY_API_KEY is not set. Please set it in the .env file."
-    )
+DATA_DIR.mkdir(exist_ok=True)
+# 注：MARKIFY_API_KEY 是否存在的检查移到 MarkifyClient.from_env()，
+# 这样仅 import config（如查路径常量）不会因为缺 key 而崩溃。
