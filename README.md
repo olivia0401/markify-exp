@@ -1,91 +1,22 @@
-# Markify Experiments
+# Markify API Experiments
 
-Two experiments on the Markify trademark API.
+Two experiments using the Markify trademark API: distance-score analysis and timing measurements. API access is rate-limited; live runs consume your account quota.
 
 ## Setup
 
 ```bash
 pip install -r requirements.lock
-echo "MARKIFY_API_KEY=<your-key>" > .env
 ```
 
-## Run
+Set `MARKIFY_API_KEY` in `.env` (see `.env.example` if present). Input data and output paths are configured in `src/config.py`.
 
-### Experiment 1 — Distance Score
+## Run
 
 ```bash
 python -m scripts.run_experiment_1
 python -m scripts.analyze_experiment_1
-python -m scripts.build_exp1_xlsx
-```
-
-### Experiment 2 — Timing
-
-```bash
 python -m scripts.run_experiment_2
-python -m scripts.run_experiment_2_variance --force --rounds 30 --per-stratum 2
 python -m scripts.analyze_experiment_2
-python -m scripts.build_exp2_xlsx
 ```
 
-### Smoke test
-
-```bash
-python -m scripts.test_call
-```
-
-## File structure
-
-```
-src/
-  config.py             paths, API key, rate limit, timeout
-  markify_client.py     Markify API client
-
-scripts/
-  test_call.py                  1-call smoke test
-  run_experiment_1.py           Exp 1 data collection
-  analyze_experiment_1.py       Exp 1 analysis (CSV + PNG)
-  build_exp1_xlsx.py            Exp 1 Excel builder
-  run_experiment_2.py           Exp 2 main run
-  run_experiment_2_variance.py  Exp 2 variance subset
-  analyze_experiment_2.py       Exp 2 analysis (CSV + PNG)
-  build_exp2_xlsx.py            Exp 2 Excel builder
-
-data/
-  Markify tests.xlsx            input names + scenarios
-  known_bad_db_codes.json       persisted set of failing DB codes
-
-outputs/    generated CSV + PNG (gitignored)
-Results/    final Excel deliverables
-```
-
-## CLI flags
-
-- `--max-calls N` (default 1900) — stop after N API calls. Re-run next day to resume.
-- `--max-names N` (Exp 1) — process at most N names.
-- `--max-scenarios N` (Exp 2) — process at most N scenarios.
-- `--rounds N` / `--per-stratum N` (variance) — sample size.
-- `--force` (variance) — overwrite existing variance CSV.
-
-## Settings (in `src/markify_client.py` and `src/config.py`)
-
-- `mode = knockout`, `gas = 1`, `min_score = 0`
-- 2-second rate limit between calls
-- 18-second HTTP timeout
-- Cache busting: `_cb` random URL parameter + `Cache-Control: no-cache`
-- `EU` / `US` auto-translated to `EUIPO` / `USPTO`
-- Quota latch: first quota error stops the run; resume next day
-
-## Resume behaviour
-
-Run scripts skip work already in the CSV. Failed or truncated rows are
-auto-redone on the next run with the same command.
-
-## Offline checks
-
-`python -m pytest tests -q` covers runner imports, pagination, result contracts,
-timeout accounting and error redaction without an API key. The smoke command
-above makes a real, quota-consuming request only when explicitly executed.
-The 2026-11-05 review restored the runner/client API contract and updated eight
-locked dependencies to versions with no known vulnerabilities in a pip-audit
-scan on that date. Live Markify calls were not re-run during this review.
+To build the Excel reports, run `python -m scripts.build_exp1_xlsx` or `python -m scripts.build_exp2_xlsx`. Offline checks: `python -m pytest tests -q`.
