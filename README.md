@@ -80,3 +80,12 @@ Results/    final Excel deliverables
 
 Run scripts skip work already in the CSV. Failed or truncated rows are
 auto-redone on the next run with the same command.
+
+## Offline checks
+
+`python -m pytest tests -q` covers runner imports, pagination, result contracts,
+timeout accounting and error redaction without an API key. The smoke command
+above makes a real, quota-consuming request only when explicitly executed.
+The 2026-11-05 review restored the runner/client API contract and updated eight
+locked dependencies to versions with no known vulnerabilities in a pip-audit
+scan on that date. Live Markify calls were not re-run during this review.

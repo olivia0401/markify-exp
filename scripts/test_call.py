@@ -1,19 +1,16 @@
 from src.markify_client import search
 
-print("Smoke test: mark='Apple', classes='9', databases='USPTO'")
-r = search(mark="Apple", classes="9", databases="USPTO")
+def main():
+    print("Smoke test: mark='Apple', classes='9', databases='USPTO'")
+    r = search(mark="Apple", classes="9", databases="USPTO")
+    print(f"Status: {r.status}; HTTP: {r.http_code}; elapsed: {r.elapsed:.2f}s")
+    if r.status == "ok":
+        print(f"Total Found: {r.data.get('meta', {}).get('totalFound')}")
+        print(f"Returned: {len(r.data.get('result', []))} items")
+    else:
+        print(f"Error: {r.error}")
+    return 0 if r.status == "ok" else 1
 
-print(f"Status:    {r.status}")
-print(f"HTTP Code: {r.http_code}")
-print(f"Elapsed:   {r.elapsed:.2f}s")
 
-if r.status == "ok":
-    meta = r.data.get("meta", {})
-    results = r.data.get("result", [])
-    print(f"Total Found: {meta.get('totalFound')}")
-    print(f"Returned:    {len(results)} items")
-    if results:
-        first = results[0]
-        print(f"First mark:  {first.get('mark')} (score={first.get('distanceScore')})")
-else:
-    print(f"Error: {r.error}")
+if __name__ == "__main__":
+    raise SystemExit(main())

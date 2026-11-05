@@ -3,6 +3,7 @@
 import json
 import random
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -37,6 +38,20 @@ class CallCapExceededError(MarkifyError):
 class BadDBCodeError(MarkifyError):
     """数据库代码无效"""
 
+
+# Retain the public name used by the experiment runners.
+CallCapReachedError = CallCapExceededError
+
+
+@dataclass
+class CallResult:
+    status: str
+    data: Optional[dict] = None
+    error: Optional[str] = None
+    elapsed: float = 0.0
+    http_code: Optional[int] = None
+    pages_fetched: int = 0
+
 # 主类
 
 class MarkifyClient:
@@ -68,6 +83,11 @@ class MarkifyClient:
         self._quota_exhausted = False
         self._bad_codes_file = Path(bad_codes_file) if bad_codes_file else None
         self._known_bad_db_codes = self._load_bad_codes()
+        self._last_http_code = None
+
+    @property
+    def call_count(self):
+        return self._call_count
 
     @classmethod
     def from_env(cls, **overrides):
@@ -118,7 +138,8 @@ class MarkifyClient:
         **kwargs,
     ) -> dict:
         # 搜索一页，api(根据api文档写required参数)，用户需要自己传的，返回 Result 对象
-        db_code = DB_CODE_ALIASES.get(database, database)
+        db_code = ",".join(DB_CODE_ALIASES.get(db.strip(), db.strip())
+                           for db in database.split(","))
         # 发请求前先拦：已知坏的 DB code 直接抛，不浪费 quota
         if db_code in self._known_bad_db_codes:
             raise BadDBCodeError(f"已知无效的 DB code: {db_code}")
@@ -144,33 +165,66 @@ class MarkifyClient:
             self._save_bad_codes()
             raise
 
-    def search_all(
-        self,
-        mark: str,
-        classes: str,
-        database: str,
-        mode: str = "knockout",
-        startIndex: int = 0,
-        pageLimit: int = 30,
-        **kwargs,
-    ):
-        # 搜索所有页，api(根据api文档写required参数)，返回 Result 对象，包含所有页数据
-        while True:
-            result = self.search(
-                mark=mark,
-                classes=classes,
-                database=database,
-                mode=mode,
-                startIndex=startIndex,
-                pageLimit=pageLimit,
-                **kwargs,
-            )
-            yield result
+    def _result(self, **kwargs):
+        """Adapt raw responses to the stable contract used by the runners."""
+        started = time.monotonic()
+        self._last_http_code = None
+        try:
+            data = self.search(**kwargs)
+            return CallResult("ok", data=data, elapsed=time.monotonic() - started,
+                              http_code=self._last_http_code, pages_fetched=1)
+        except (QuotaExhaustedError, CallCapExceededError, InvalidAPIKeyError, ExpiredAPIKeyError):
+            raise
+        except requests.exceptions.Timeout:
+            status, message = "timeout", "Request timed out"
+        except requests.exceptions.RequestException:
+            status, message = "http_error", "Request failed"
+        except (MarkifyError, ValueError):
+            # Transport exceptions and response bodies may contain the API key.
+            status, message = "http_error", "API returned an unsuccessful or invalid response"
+        return CallResult(status, error=message, elapsed=time.monotonic() - started,
+                          http_code=self._last_http_code)
 
-            total = int(result["meta"]["totalFound"])
-            startIndex += pageLimit
-            if startIndex >= total:
-                break
+    def search_all(self, mark, classes, database=None, mode="knockout",
+                   startIndex=0, pageLimit=30, **kwargs):
+        database = kwargs.pop("databases", database)
+        page_limit = kwargs.pop("page_limit", pageLimit)
+        max_pages = kwargs.pop("max_pages", 100)
+        min_score = kwargs.pop("min_score", kwargs.pop("minScore", 0.0))
+        if page_limit <= 0 or max_pages <= 0 or startIndex < 0 or not database:
+            raise ValueError("database and positive page limits are required")
+        started = time.monotonic()
+        items, pages, meta = [], 0, {}
+        for _ in range(max_pages):
+            result = self._result(mark=mark, classes=classes, database=database,
+                                  mode=mode, startIndex=startIndex,
+                                  pageLimit=page_limit, minScore=min_score, **kwargs)
+            if result.status != "ok":
+                result.elapsed = time.monotonic() - started
+                result.pages_fetched = pages
+                return result
+            data = result.data
+            page = data.get("result", [])
+            if not isinstance(page, list) or not isinstance(data.get("meta", {}), dict):
+                return CallResult("http_error", error="Invalid page structure",
+                                  elapsed=time.monotonic() - started, pages_fetched=pages)
+            pages += 1
+            items.extend(page)
+            meta = data.get("meta", {})
+            total = meta.get("totalFound")
+            try:
+                complete = (startIndex + len(page) >= int(total)) if total is not None else len(page) < page_limit
+            except (TypeError, ValueError):
+                return CallResult("http_error", error="Invalid totalFound",
+                                  elapsed=time.monotonic() - started, pages_fetched=pages)
+            if not page or complete:
+                return CallResult("ok", data={"meta": meta, "result": items},
+                                  elapsed=time.monotonic() - started,
+                                  http_code=result.http_code, pages_fetched=pages)
+            startIndex += len(page)
+        return CallResult("ok_truncated", data={"meta": meta, "result": items},
+                          elapsed=time.monotonic() - started,
+                          http_code=result.http_code, pages_fetched=pages)
 
     #----内部方法（实现细节）-----
     def _load_bad_codes(self):
@@ -204,17 +258,21 @@ class MarkifyClient:
         self._wait_for_rate_limit()
         params = {**params, "_cb": random.randint(1, 10**9)}
         # cache busting：让每次的 URL 都长得不一样，缓存层就不会命中旧结果
+        # Count attempts before I/O: timeouts may still consume server quota.
+        self._call_count += 1
         response = self._session.get(
             url,
             params=params,
             headers=_NO_CACHE_HEADERS,
             timeout=self.http_timeout,
         )
-        self._call_count += 1
+        self._last_http_code = response.status_code
         if response.status_code != 200:
-            raise MarkifyError(f"HTTP错误 {response.status_code}: {response.text}")
+            raise MarkifyError(f"HTTP错误 {response.status_code}")
 
         data = response.json()
+        if not isinstance(data, dict):
+            raise MarkifyError("API response must be an object")
         if "error" in data:
             self._classify_error(data)
         return data
@@ -240,7 +298,9 @@ class MarkifyClient:
 
     def _classify_error(self, data):
         # 根据 API 返回的 error 文本分类抛对应异常
-        msg = data["error"]
+        msg = str(data["error"])
+        if self.api_key:
+            msg = msg.replace(self.api_key, "[REDACTED]")
         if "Invalid" in msg or "Inactive" in msg:
             raise InvalidAPIKeyError(msg)
         elif "Quota" in msg and "exceeded" in msg:
@@ -252,3 +312,37 @@ class MarkifyClient:
             raise BadDBCodeError(msg)
         else:
             raise MarkifyError(f"未知错误: {msg}")
+
+
+_default_client = None
+_default_cap = 700
+
+
+def _get_client():
+    global _default_client
+    if _default_client is None:
+        _default_client = MarkifyClient.from_env(call_cap=_default_cap)
+    return _default_client
+
+
+def set_call_cap(cap):
+    global _default_cap
+    if cap is not None and cap < 0:
+        raise ValueError("call cap must be non-negative")
+    _default_cap = cap
+    if _default_client is not None:
+        _default_client.call_cap = cap
+
+
+def get_call_count():
+    return _default_client.call_count if _default_client is not None else 0
+
+
+def search(mark, classes, databases=None, *, database=None, min_score=0.0,
+           page_limit=30, **kwargs):
+    """One-page compatibility API used by timing and smoke-test scripts."""
+    database = databases or database
+    if not database or page_limit <= 0:
+        raise ValueError("database and a positive page_limit are required")
+    return _get_client()._result(mark=mark, classes=classes, database=database,
+                                 minScore=min_score, pageLimit=page_limit, **kwargs)
